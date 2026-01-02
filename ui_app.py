@@ -39,9 +39,9 @@ if page == "🎯 Today's Market Call":
     
     st.info("""
     💡 **What does this mean for beginners?**
-    - **CALL**: Market is expected to go UP ⬆️ - Good time to BUY
-    - **PUT**: Market is expected to go DOWN ⬇️ - Better to SELL or WAIT
-    - **NEUTRAL**: Market is UNCERTAIN - Be CAUTIOUS
+    - **CALL**: Market is expected to go UP ⬆️ - Good time to BUY CALL OPTIONS
+    - **PUT**: Market is expected to go DOWN ⬇️ - Better to BUY PUT OPTIONS or WAIT
+    - **NEUTRAL**: Market is UNCERTAIN - Be CAUTIOUS with options
     """)
     
     st.write("---")
@@ -67,12 +67,12 @@ if page == "🎯 Today's Market Call":
                 call_type = "CALL (BUY)"
                 call_color = "green"
                 call_emoji = "📈"
-                recommendation = "Market sentiment is POSITIVE. Consider BUYING or HOLDING."
+                recommendation = "Market sentiment is POSITIVE. Consider BUYING CALLS or HOLDING."
             elif avg_compound < -0.1:
                 call_type = "PUT (SELL)"
                 call_color = "red"
                 call_emoji = "📉"
-                recommendation = "Market sentiment is NEGATIVE. Consider SELLING or WAITING."
+                recommendation = "Market sentiment is NEGATIVE. Consider BUYING PUTS or WAITING."
             else:
                 call_type = "NEUTRAL (HOLD)"
                 call_emoji = "➡️"
@@ -106,6 +106,110 @@ if page == "🎯 Today's Market Call":
                 use_container_width=True,
                 height=200
             )
+            
+            st.write("---")
+            
+            # ========== NEW: Index Options Section ==========
+            st.markdown("### 🎯 OPTIONS TO BUY TODAY")
+            st.markdown("**Based on today's market analysis, here are the recommended options:**")
+            
+            # Create options recommendations based on sentiment
+            options_data = []
+            
+            # Nifty 50 options
+            if call_type == "CALL (BUY)":
+                options_data.append({
+                    "Index": "Nifty 50",
+                    "Strategy": "📈 BUY CALL",
+                    "Strike Price": "23,600",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Positive sentiment - Market expected to go UP",
+                    "Risk Level": "🟢 Low-Medium"
+                })
+                options_data.append({
+                    "Index": "Nifty 50",
+                    "Strategy": "📈 BUY CALL",
+                    "Strike Price": "23,700",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Target higher - More profit potential",
+                    "Risk Level": "🟡 Medium"
+                })
+            else:
+                options_data.append({
+                    "Index": "Nifty 50",
+                    "Strategy": "📉 BUY PUT",
+                    "Strike Price": "23,400",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Negative sentiment - Market expected to go DOWN",
+                    "Risk Level": "🟢 Low-Medium"
+                })
+                options_data.append({
+                    "Index": "Nifty 50",
+                    "Strategy": "📉 BUY PUT",
+                    "Strike Price": "23,300",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Target lower - More profit potential",
+                    "Risk Level": "🟡 Medium"
+                })
+            
+            # Bank Nifty options
+            if call_type == "CALL (BUY)":
+                options_data.append({
+                    "Index": "Bank Nifty",
+                    "Strategy": "📈 BUY CALL",
+                    "Strike Price": "60,000",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Positive market - Finance sector strong",
+                    "Risk Level": "🟢 Low-Medium"
+                })
+                options_data.append({
+                    "Index": "Bank Nifty",
+                    "Strategy": "📈 BUY CALL",
+                    "Strike Price": "60,500",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Aggressive strategy - Higher returns",
+                    "Risk Level": "🟡 Medium"
+                })
+            else:
+                options_data.append({
+                    "Index": "Bank Nifty",
+                    "Strategy": "📉 BUY PUT",
+                    "Strike Price": "59,500",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Negative market - Protect from losses",
+                    "Risk Level": "🟢 Low-Medium"
+                })
+                options_data.append({
+                    "Index": "Bank Nifty",
+                    "Strategy": "📉 BUY PUT",
+                    "Strike Price": "59,000",
+                    "Expiry Date": "27 Jan 2026",
+                    "Reason": "Target lower - More profit potential",
+                    "Risk Level": "🟡 Medium"
+                })
+            
+            options_df = pd.DataFrame(options_data)
+            
+            # Display options in colored boxes
+            for idx, row in options_df.iterrows():
+                if "CALL" in row["Strategy"]:
+                    st.markdown(f"""
+                    <div class="call-box">
+                        <b>{row['Index']} - {row['Strategy']}</b><br/>
+                        Strike: ₹{row['Strike Price']} | Expiry: {row['Expiry Date']}<br/>
+                        <small>📝 {row['Reason']}<br/>
+                        Risk: {row['Risk Level']}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="put-box">
+                        <b>{row['Index']} - {row['Strategy']}</b><br/>
+                        Strike: ₹{row['Strike Price']} | Expiry: {row['Expiry Date']}<br/>
+                        <small>📝 {row['Reason']}<br/>
+                        Risk: {row['Risk Level']}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             st.write("---")
             
@@ -203,7 +307,7 @@ elif page == "📊 Stock Predictions":
     with col2:
         prediction_type = st.radio(
             "Show Predictions",
-            ["Both", "Only Strong BUY (>60%)", "Only Strong SELL (<40%)"],
+            ["Only Strong BUY (>60%)", "All Predictions", "Only Strong SELL (<40%)"],
             horizontal=True
         )
     
@@ -291,7 +395,32 @@ elif page == "📊 Stock Predictions":
                     filtered_df["Prob_Val"] = filtered_df["Probability (%)"].str.rstrip("%").astype(float)
                     filtered_df = filtered_df.sort_values("Prob_Val", ascending=False).drop("Prob_Val", axis=1)
                     
-                    st.subheader(f"📈 Stock Predictions ({len(filtered_df)} stocks)")
+                    # ========== ENHANCED: Show Strong BUY first ==========
+                    strong_buy_df = filtered_df[filtered_df["Signal"] == "🟢 STRONG BUY"]
+                    other_df = filtered_df[filtered_df["Signal"] != "🟢 STRONG BUY"]
+                    
+                    if len(strong_buy_df) > 0:
+                        st.subheader(f"� STRONG BUY STOCKS - {len(strong_buy_df)} STOCKS WITH HIGH CONFIDENCE")
+                        st.markdown("""
+                        <div style="background-color: #d4edda; padding: 15px; border-radius: 8px; border-left: 5px solid #28a745;">
+                        <b>✨ These stocks have the HIGHEST probability of going UP (>60%)</b><br/>
+                        <small>Based on AI analysis + Latest market news sentiment</small>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        for idx, row in strong_buy_df.iterrows():
+                            st.markdown(f"""
+                            <div class="call-box">
+                                <b>✅ {row['Symbol']}</b> ({row['Sector']})<br/>
+                                🎯 Signal: {row['Signal']} | Probability: <b>{row['Probability (%)']}</b><br/>
+                                💪 Confidence: {row['Confidence']} | 📰 News Sentiment: {row['News Sentiment']}<br/>
+                                <small style="color: green;">✓ RECOMMENDED FOR TODAY'S TRADING</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        st.write("---")
+                    
+                    st.subheader(f"�📈 All Stock Predictions ({len(filtered_df)} stocks)")
                     
                     if len(filtered_df) > 0:
                         # Display as table with color coding
