@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 
 logger = get_logger("ui_app")
-st.set_page_config(page_title="Stock Market Guide for Beginners", layout="wide")
+st.set_page_config(page_title="Stock Market Guide for Beginners", layout="wide", initial_sidebar_state="expanded")
 
 # Custom CSS for beginner-friendly styling
 st.markdown("""
