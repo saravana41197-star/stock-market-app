@@ -21,8 +21,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 Stock Market Guide for Beginners")
+st.title("📈 Stock Market Guide for Beginners v2.0")
 st.write("*Learn about Indian stocks with real-time sentiment analysis and AI predictions*")
+st.write("<small>Last Updated: Jan 2, 2026 - 21:38</small>", unsafe_allow_html=True)
 
 # Sidebar for navigation
 st.sidebar.header("📋 Navigation")
