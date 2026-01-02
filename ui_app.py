@@ -111,8 +111,8 @@ if page == "🎯 Today's Market Call":
             st.write("---")
             
             # ========== NEW: Index Options Section ==========
-            st.markdown("### 🎯 OPTIONS TO BUY TODAY")
-            st.markdown("**Based on today's market analysis, here are the recommended options:**")
+            st.subheader("🎯 OPTIONS TO BUY TODAY - RECOMMENDED")
+            st.info("**Based on today's market analysis, here are the recommended options to trade:**")
             
             # Create options recommendations based on sentiment
             options_data = []
@@ -190,6 +190,8 @@ if page == "🎯 Today's Market Call":
                 })
             
             options_df = pd.DataFrame(options_data)
+            
+            st.warning(f"📌 DEBUG: Showing {len(options_df)} option recommendations")
             
             # Display options in colored boxes
             for idx, row in options_df.iterrows():
