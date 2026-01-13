@@ -2,479 +2,593 @@ import streamlit as st
 from data_fetcher import fetch_market_news, fetch_price, fetch_multiple_prices
 from sentiment_analysis import analyze_headlines, score_text
 from visualizer import plot_sentiment_bar, plot_price_trend
-from predictor import build_training_set, train_model, predict_for_symbols
+# from predictor import build_training_set, train_model, predict_for_symbols  # Old ML-based predictions
+from realtime_data import get_index_data, get_stock_data, data_fetcher
+from intraday_predictor import get_index_predictions, get_stock_picks
+from enhanced_intraday_predictor import get_enhanced_intraday_tables
+from stable_predictor import get_stable_predictions
+from fast_cache import cached_fetch, CACHE_KEYS
 from utils import get_logger
 import pandas as pd
 import numpy as np
+from datetime import datetime
+import time
+import os
+from typing import Dict
 
 logger = get_logger("ui_app")
-st.set_page_config(page_title="Stock Market Guide for Beginners", layout="wide", initial_sidebar_state="expanded")
 
-# Custom CSS for beginner-friendly styling
+def _display_index_card(index_name: str, pred_data: Dict, full_width: bool = False):
+    """Display a single index card with responsive design."""
+    # Determine card color based on signal
+    if pred_data['signal'] == 'CALL':
+        bg_color = 'linear-gradient(135deg, #28a745 0%, #20c997 100%)'
+        emoji = '📈'
+    elif pred_data['signal'] == 'PUT':
+        bg_color = 'linear-gradient(135deg, #dc3545 0%, #fd7e14 100%)'
+        emoji = '📉'
+    else:
+        bg_color = 'linear-gradient(135deg, #6c757d 0%, #495057 100%)'
+        emoji = '➡️'
+    
+    # Responsive padding and font sizes
+    if st.session_state.get('screen_width', 1200) < 480:
+        padding = '15px'
+        font_size = '1.8em'
+        name_font = '1.0em'
+    elif st.session_state.get('screen_width', 1200) < 768:
+        padding = '20px'
+        font_size = '2.2em'
+        name_font = '1.1em'
+    else:
+        padding = '25px'
+        font_size = '2.5em'
+        name_font = '1.2em'
+    
+    # Custom index card
+    st.markdown(f"""
+    <div style="background: {bg_color}; color: white; padding: {padding}; border-radius: 15px; margin: 10px 0; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+        <div style="text-align: center; margin-bottom: 15px;">
+            <h3 style="margin: 0; font-size: {name_font};">{index_name}</h3>
+        </div>
+        <div style="text-align: center; margin-bottom: 20px;">
+            <div style="font-size: {font_size}; font-weight: bold; margin-bottom: 10px;">{emoji} {pred_data['signal']}</div>
+            <div style="font-size: 1.1em;">Confidence: {pred_data['confidence']}%</div>
+        </div>
+        <div style="font-size: 0.9em; opacity: 0.9;">
+            <strong>Current Price:</strong> ₹{pred_data.get('current_price', 0):.2f}<br/>
+            <strong>Change:</strong> {pred_data.get('price_change_pct', 0):+.2f}%<br/>
+            <strong>Volume:</strong> {pred_data.get('volume_ratio', 1.0):.1f}x avg
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Display reasons
+    if pred_data.get('reasons'):
+        st.markdown("**Why this signal?**")
+        for reason in pred_data['reasons']:
+            st.write(f"• {reason}")
+st.set_page_config(
+    page_title="Live Intraday Stock Predictor",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="auto",  # Auto-adjust based on screen size
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': "Live Intraday Stock Market Predictor - Educational Tool"
+    }
+)
+
+# Custom CSS for responsive beginner-friendly styling
 st.markdown("""
     <style>
+    /* Base styles */
     .big-font { font-size: 24px; font-weight: bold; color: #1f77b4; }
     .metric-box { background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin: 10px 0; }
-    .call-box { background-color: #d4edda; padding: 15px; border-radius: 8px; border-left: 5px solid #28a745; }
-    .put-box { background-color: #f8d7da; padding: 15px; border-radius: 8px; border-left: 5px solid #dc3545; }
-    .neutral-box { background-color: #e7e7e7; padding: 15px; border-radius: 8px; border-left: 5px solid #6c757d; }
+    .call-box { background-color: #d4edda; padding: 20px; border-radius: 12px; border-left: 6px solid #28a745; margin: 10px 0; }
+    .put-box { background-color: #f8d7da; padding: 20px; border-radius: 12px; border-left: 6px solid #dc3545; margin: 10px 0; }
+    .neutral-box { background-color: #e7e7e7; padding: 20px; border-radius: 12px; border-left: 6px solid #6c757d; margin: 10px 0; }
+    .index-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; border-radius: 15px; margin: 15px 0; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+    .stock-pick-card { background-color: #f8f9fa; padding: 20px; border-radius: 10px; margin: 10px 0; border-left: 4px solid #007bff; }
+    .confidence-badge { background-color: #28a745; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+    .disclaimer { background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 20px 0; }
+    
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .big-font { font-size: 18px; }
+        .call-box, .put-box, .neutral-box { padding: 15px; margin: 8px 0; }
+        .index-card { padding: 20px; margin: 10px 0; }
+        .stock-pick-card { padding: 15px; margin: 8px 0; }
+        .disclaimer { padding: 12px; margin: 15px 0; }
+    }
+    
+    @media (max-width: 480px) {
+        .big-font { font-size: 16px; }
+        .call-box, .put-box, .neutral-box { padding: 12px; margin: 5px 0; }
+        .index-card { padding: 15px; margin: 8px 0; }
+        .stock-pick-card { padding: 12px; margin: 5px 0; }
+        .disclaimer { padding: 10px; margin: 10px 0; }
+    }
+    
+    /* Table responsive styles */
+    .dataframe {
+        font-size: 14px;
+    }
+    
+    @media (max-width: 768px) {
+        .dataframe {
+            font-size: 12px;
+        }
+    }
+    
+    @media (max-width: 480px) {
+        .dataframe {
+            font-size: 10px;
+        }
+    }
+    
+    /* Hide streamlit footer on mobile */
+    @media (max-width: 768px) {
+        .stDeployButton {
+            display: none;
+        }
+    }
+    
+    /* Responsive columns */
+    @media (max-width: 768px) {
+        .element-container:has([data-testid="stHorizontalBlock"]) {
+            flex-direction: column !important;
+        }
+    }
+    
+    /* Mobile-friendly sidebar */
+    @media (max-width: 768px) {
+        .css-1d391kg {
+            width: 100% !important;
+        }
+    }
+    
+    /* Touch-friendly buttons */
+    @media (max-width: 768px) {
+        .stButton > button {
+            padding: 12px 24px;
+            font-size: 16px;
+            margin: 5px 0;
+        }
+    }
+    
+    /* Responsive metrics */
+    @media (max-width: 768px) {
+        .metric-container {
+            margin: 5px 0;
+        }
+    }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 Stock Market Guide for Beginners v2.0")
-st.write("*Learn about Indian stocks with real-time sentiment analysis and AI predictions*")
-st.write("<small>Last Updated: Jan 2, 2026 - 21:38</small>", unsafe_allow_html=True)
+st.title("📈 Live Intraday Stock Predictor")
+st.write("*Real-time intraday predictions for Indian indices and stocks*")
+st.write(f"<small>Last Updated: {datetime.now().strftime('%B %d, %Y - %H:%M:%S')}</small>", unsafe_allow_html=True)
 
-# Sidebar for navigation
+# Mobile-friendly header
+st.markdown("""
+<style>
+@media (max-width: 768px) {
+    .stTitle {
+        font-size: 24px !important;
+    }
+    .stMarkdown {
+        font-size: 14px !important;
+    }
+}
+@media (max-width: 480px) {
+    .stTitle {
+        font-size: 20px !important;
+    }
+    .stMarkdown {
+        font-size: 12px !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Sidebar for navigation - responsive design
 st.sidebar.header("📋 Navigation")
 page = st.sidebar.radio("Choose a Section", [
-    "🎯 Today's Market Call",
-    "📊 Stock Predictions",
+    "🎯 Live Market Calls",
+    "📊 Intraday Stock Picks",
     "📰 News Sentiment",
     "💹 Stock Trends"
-])
+], key="navigation")
 
-# ============ Page 1: Today's Market Call ============
-if page == "🎯 Today's Market Call":
-    st.header("🎯 Today's Market Call - Call vs Put Decision")
+# Auto-refresh control - mobile-friendly
+st.sidebar.header("⚙️ Settings")
+auto_refresh = st.sidebar.checkbox("🔄 Auto-refresh (60s)", value=False)
+if auto_refresh:
+    st.sidebar.warning("Auto-refresh is disabled for better performance")
+    if st.sidebar.button("🔄 Refresh Now", use_container_width=True):
+        st.rerun()
+else:
+    if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
+        st.rerun()
+
+# Add mobile-friendly info
+st.sidebar.markdown("---")
+st.sidebar.markdown("**📱 Device Info:**")
+if st.sidebar.button("📊 Show Performance Tips"):
+    st.sidebar.info("""
+    💡 **Performance Tips:**
+    - Use manual refresh on mobile
+    - Close other tabs for better speed
+    - Use WiFi for faster loading
+    - Refresh data when needed
+    """)
+
+# Add loading optimization info
+st.sidebar.markdown("---")
+st.sidebar.markdown("**⚡ Performance:**")
+st.sidebar.info("""
+    🚀 **Optimizations Active:**
+    - 24hr stable predictions
+    - Smart caching enabled
+    - Fast loading times
+    - Minimal data usage
+    """)
+
+# Add cache management
+st.sidebar.markdown("---")
+st.sidebar.markdown("**🗂️ Cache Management:**")
+if st.sidebar.button("🔄 Clear Cache & Regenerate"):
+    from fast_cache import fast_cache
+    fast_cache.clear()
+    from stable_predictor import stable_predictor
+    try:
+        os.remove(stable_predictor.prediction_file)
+    except:
+        pass
+    st.sidebar.success("Cache cleared! New predictions will be generated.")
+    st.rerun()
+
+# Add force refresh button for dynamic reasons
+st.sidebar.markdown("---")
+st.sidebar.markdown("**📰 Dynamic Reasons:**")
+if st.sidebar.button("🌐 Refresh with Latest News", help="Generate new predictions with current market news"):
+    from fast_cache import fast_cache
+    from stable_predictor import stable_predictor
+    fast_cache.clear()
+    try:
+        os.remove(stable_predictor.prediction_file)
+    except:
+        pass
+    st.sidebar.info("Fetching latest news and generating new reasons...")
+    st.rerun()
+
+# ============ Page 1: Live Market Calls ============
+if page == "🎯 Live Market Calls":
+    st.header("🎯 Live Market Calls - Real-time Index Predictions")
     
     st.info("""
     💡 **What does this mean for beginners?**
-    - **CALL**: Market is expected to go UP ⬆️ - Good time to BUY CALL OPTIONS
-    - **PUT**: Market is expected to go DOWN ⬇️ - Better to BUY PUT OPTIONS or WAIT
-    - **NEUTRAL**: Market is UNCERTAIN - Be CAUTIOUS with options
+    - **CALL**: Market expected to go UP ⬆️ - Consider buying CALL options
+    - **PUT**: Market expected to go DOWN ⬇️ - Consider buying PUT options
+    - **NEUTRAL**: Market UNCERTAIN - Be cautious with new positions
+    
+    📊 **Confidence %**: How sure we are about the prediction (higher = better)
     """)
+    
+    # Add disclaimer
+    st.markdown("""
+    <div class="disclaimer">
+    <strong>⚠️ Educational Disclaimer:</strong> This is for educational purposes only and NOT financial advice. 
+    Always consult a qualified financial advisor before making any investment decisions. 
+    Markets are inherently risky and predictions can be wrong.
+    </div>
+    """, unsafe_allow_html=True)
     
     st.write("---")
     
-    # Fetch and analyze news
-    with st.spinner("🔄 Analyzing latest market news..."):
-        news = fetch_market_news()
-        combined_headlines = []
-        for src, headlines in news.items():
-            combined_headlines.extend(headlines)
-        
-        if combined_headlines:
-            sentiments = analyze_headlines(combined_headlines[:100])
-            
-            # Calculate sentiment statistics
-            positive = sum(1 for s in sentiments if s.get("compound", 0) > 0.05)
-            negative = sum(1 for s in sentiments if s.get("compound", 0) < -0.05)
-            neutral = len(sentiments) - positive - negative
-            avg_compound = sum(s.get("compound", 0) for s in sentiments) / len(sentiments) if sentiments else 0
-            
-            # Determine market call
-            if avg_compound > 0.1:
-                call_type = "CALL (BUY)"
-                call_color = "green"
-                call_emoji = "📈"
-                recommendation = "Market sentiment is POSITIVE. Consider BUYING CALLS or HOLDING."
-            elif avg_compound < -0.1:
-                call_type = "PUT (SELL)"
-                call_color = "red"
-                call_emoji = "📉"
-                recommendation = "Market sentiment is NEGATIVE. Consider BUYING PUTS or WAITING."
-            else:
-                call_type = "NEUTRAL (HOLD)"
-                call_emoji = "➡️"
-                call_color = "gray"
-                recommendation = "Market sentiment is MIXED. Be CAUTIOUS with new positions."
-            
-            # Display main indices table
-            st.markdown("### 📊 Index Calls Today")
-            
-            indices_data = {
-                "Index Name": ["Nifty 50", "Bank Nifty", "Sensex"],
-                "Current Call": [call_type, call_type, call_type],
-                "Sentiment Score": [f"{avg_compound:.2f}", f"{avg_compound:.2f}", f"{avg_compound:.2f}"],
-                "Recommendation": [recommendation, recommendation, recommendation],
-                "Data Source": ["NSE (National Stock Exchange)", "NSE", "BSE (Bombay Stock Exchange)"]
-            }
-            
-            indices_df = pd.DataFrame(indices_data)
-            
-            # Color the Call column
-            def color_call(call):
-                if "CALL" in call:
-                    return "color: green; font-weight: bold;"
-                elif "PUT" in call:
-                    return "color: red; font-weight: bold;"
-                else:
-                    return "color: orange; font-weight: bold;"
-            
-            st.dataframe(
-                indices_df.style.applymap(lambda x: color_call(x) if isinstance(x, str) else "", subset=["Current Call"]),
-                use_container_width=True,
-                height=200
+    # Fetch real-time predictions with fast caching
+    with st.spinner("🔄 Loading market data..."):
+        try:
+            # Use cached data for faster loading
+            predictions = cached_fetch(
+                CACHE_KEYS['index_predictions'],
+                get_index_predictions,
+                max_age_hours=0.5  # 30 minutes cache
             )
             
-            st.write("---")
-            
-            # ========== NEW: Index Options Section ==========
-            st.subheader("🎯 OPTIONS TO BUY TODAY - RECOMMENDED")
-            st.info("**Based on today's market analysis, here are the recommended options to trade:**")
-            
-            # Create options recommendations based on sentiment
-            options_data = []
-            
-            # Nifty 50 options
-            if call_type == "CALL (BUY)":
-                options_data.append({
-                    "Index": "Nifty 50",
-                    "Strategy": "📈 BUY CALL",
-                    "Strike Price": "23,600",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Positive sentiment - Market expected to go UP",
-                    "Risk Level": "🟢 Low-Medium"
-                })
-                options_data.append({
-                    "Index": "Nifty 50",
-                    "Strategy": "📈 BUY CALL",
-                    "Strike Price": "23,700",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Target higher - More profit potential",
-                    "Risk Level": "🟡 Medium"
-                })
+            # Display index predictions in responsive cards
+            # Responsive columns based on screen size
+            if st.session_state.get('screen_width', 1200) < 768:
+                # Mobile: Single column
+                for i, (index_name, pred_data) in enumerate(predictions.items()):
+                    _display_index_card(index_name, pred_data, full_width=True)
+            elif st.session_state.get('screen_width', 1200) < 1024:
+                # Tablet: 2 columns
+                col1, col2 = st.columns(2)
+                items = list(predictions.items())
+                for i, (index_name, pred_data) in enumerate(items[:2]):
+                    with [col1, col2][i]:
+                        _display_index_card(index_name, pred_data)
+                if len(items) > 2:
+                    with col1:
+                        _display_index_card(items[2][0], items[2][1])
             else:
-                options_data.append({
-                    "Index": "Nifty 50",
-                    "Strategy": "📉 BUY PUT",
-                    "Strike Price": "23,400",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Negative sentiment - Market expected to go DOWN",
-                    "Risk Level": "🟢 Low-Medium"
-                })
-                options_data.append({
-                    "Index": "Nifty 50",
-                    "Strategy": "📉 BUY PUT",
-                    "Strike Price": "23,300",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Target lower - More profit potential",
-                    "Risk Level": "🟡 Medium"
-                })
+                # Desktop: 3 columns
+                col1, col2, col3 = st.columns(3)
+                for i, (index_name, pred_data) in enumerate(predictions.items()):
+                    col = [col1, col2, col3][i]
+                    with col:
+                        _display_index_card(index_name, pred_data)
             
-            # Bank Nifty options
-            if call_type == "CALL (BUY)":
-                options_data.append({
-                    "Index": "Bank Nifty",
-                    "Strategy": "📈 BUY CALL",
-                    "Strike Price": "60,000",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Positive market - Finance sector strong",
-                    "Risk Level": "🟢 Low-Medium"
-                })
-                options_data.append({
-                    "Index": "Bank Nifty",
-                    "Strategy": "📈 BUY CALL",
-                    "Strike Price": "60,500",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Aggressive strategy - Higher returns",
-                    "Risk Level": "🟡 Medium"
-                })
+            st.write("---")
+            
+            # Market summary
+            st.subheader("📊 Market Summary")
+            
+            # Calculate overall market sentiment
+            calls = sum(1 for p in predictions.values() if p['signal'] == 'CALL')
+            puts = sum(1 for p in predictions.values() if p['signal'] == 'PUT')
+            neutrals = sum(1 for p in predictions.values() if p['signal'] == 'NEUTRAL')
+            avg_confidence = sum(p['confidence'] for p in predictions.values()) / 3
+            
+            # Display responsive market summary
+            if st.session_state.get('screen_width', 1200) < 768:
+                # Mobile: 2x2 grid
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("📈 CALL Signals", calls, f"{calls/3*100:.0f}%")
+                with col2:
+                    st.metric("📉 PUT Signals", puts, f"{puts/3*100:.0f}%")
+                
+                col3, col4 = st.columns(2)
+                with col3:
+                    st.metric("➡️ NEUTRAL", neutrals, f"{neutrals/3*100:.0f}%")
+                with col4:
+                    st.metric("💯 Avg Confidence", f"{avg_confidence:.1f}%", "Overall confidence")
             else:
-                options_data.append({
-                    "Index": "Bank Nifty",
-                    "Strategy": "📉 BUY PUT",
-                    "Strike Price": "59,500",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Negative market - Protect from losses",
-                    "Risk Level": "🟢 Low-Medium"
-                })
-                options_data.append({
-                    "Index": "Bank Nifty",
-                    "Strategy": "📉 BUY PUT",
-                    "Strike Price": "59,000",
-                    "Expiry Date": "27 Jan 2026",
-                    "Reason": "Target lower - More profit potential",
-                    "Risk Level": "🟡 Medium"
-                })
+                # Desktop/Tablet: 4 columns
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("📈 CALL Signals", calls, f"{calls/3*100:.0f}%")
+                with col2:
+                    st.metric("📉 PUT Signals", puts, f"{puts/3*100:.0f}%")
+                with col3:
+                    st.metric("➡️ NEUTRAL", neutrals, f"{neutrals/3*100:.0f}%")
+                with col4:
+                    st.metric("💯 Avg Confidence", f"{avg_confidence:.1f}%", "Overall confidence")
             
-            options_df = pd.DataFrame(options_data)
+            # Overall market recommendation
+            if calls > puts:
+                overall_sentiment = "🟢 BULLISH - Market bias towards CALL options"
+                sentiment_color = "green"
+            elif puts > calls:
+                overall_sentiment = "🔴 BEARISH - Market bias towards PUT options"
+                sentiment_color = "red"
+            else:
+                overall_sentiment = "🟡 MIXED - Market uncertain, be cautious"
+                sentiment_color = "orange"
             
-            st.warning(f"📌 DEBUG: Showing {len(options_df)} option recommendations")
+            st.markdown(f"**Overall Market Sentiment:** <span style='color: {sentiment_color}; font-weight: bold;'>{overall_sentiment}</span>", unsafe_allow_html=True)
             
-            # Display options in colored boxes
-            for idx, row in options_df.iterrows():
-                if "CALL" in row["Strategy"]:
-                    st.markdown(f"""
-                    <div class="call-box">
-                        <b>{row['Index']} - {row['Strategy']}</b><br/>
-                        Strike: ₹{row['Strike Price']} | Expiry: {row['Expiry Date']}<br/>
-                        <small>📝 {row['Reason']}<br/>
-                        Risk: {row['Risk Level']}</small>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="put-box">
-                        <b>{row['Index']} - {row['Strategy']}</b><br/>
-                        Strike: ₹{row['Strike Price']} | Expiry: {row['Expiry Date']}<br/>
-                        <small>📝 {row['Reason']}<br/>
-                        Risk: {row['Risk Level']}</small>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            st.write("---")
-            
-            # Sentiment breakdown
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📈 Positive News", positive, f"{(positive/len(sentiments)*100):.1f}%")
-            with col2:
-                st.metric("📉 Negative News", negative, f"{(negative/len(sentiments)*100):.1f}%")
-            with col3:
-                st.metric("➡️ Neutral News", neutral, f"{(neutral/len(sentiments)*100):.1f}%")
-            with col4:
-                st.metric("💯 Sentiment Score", f"{avg_compound:.3f}", "Range: -1 to +1")
-            
-            st.write("---")
-            
-            # Top headlines
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("✅ Top Positive News (BUY Indicators)")
-                positive_headlines = sorted(sentiments, key=lambda x: x.get("compound", 0), reverse=True)[:5]
-                for idx, h in enumerate(positive_headlines, 1):
-                    text = h["text"][:100] + "..." if len(h["text"]) > 100 else h["text"]
-                    score = h.get("compound", 0)
-                    st.success(f"**{idx}. [{score:.2f}]** {text}")
-            
-            with col2:
-                st.subheader("⚠️ Top Negative News (SELL Indicators)")
-                negative_headlines = sorted(sentiments, key=lambda x: x.get("compound", 0))[:5]
-                for idx, h in enumerate(negative_headlines, 1):
-                    text = h["text"][:100] + "..." if len(h["text"]) > 100 else h["text"]
-                    score = h.get("compound", 0)
-                    st.error(f"**{idx}. [{score:.2f}]** {text}")
-            
-            st.write("---")
-            st.markdown("**📌 Data Sources:**")
-            st.markdown("""
-            - 🔗 **Economic Times** (economictimes.indiatimes.com) - Leading financial news
-            - 🔗 **Moneycontrol** (moneycontrol.com) - Stock market news & analysis
-            - 🔗 **NSE** (nseindia.com) - National Stock Exchange official
-            - 🔗 **BSE** (bseindia.com) - Bombay Stock Exchange official
-            - 📊 **Sentiment Analysis**: NLTK VADER (Natural Language Processing)
-            """)
-        else:
-            st.warning("Could not fetch news headlines at this time.")
+        except Exception as e:
+            st.error(f"❌ Error fetching live data: {str(e)}")
+            st.info("Please check your internet connection and try again.")
 
-
-# ============ Page 2: Stock Predictions ============
-elif page == "📊 Stock Predictions":
-    st.header("📊 Future Stock Predictions - AI Analysis")
+# ============ Page 2: Intraday Stock Picks ============
+elif page == "📊 Intraday Stock Picks":
+    st.header("📊 Enhanced Intraday Analysis - 3 Separate Tables")
     
     st.info("""
-    🤖 **How does AI prediction work?**
-    - Analyzes 1 year of historical price data
-    - Considers latest news sentiment (positive/negative)
-    - Uses Random Forest ML model to predict if price will go UP or DOWN
-    - Shows probability score (0-100%)
+    🎯 **Advanced Intraday Predictions:**
+    - **Regular Stocks**: Large-cap stocks with stable movements
+    - **Penny Stocks**: High-risk, high-reward opportunities (< ₹50)
+    - **Mixed Picks**: Best opportunities from both categories
+    
+    📊 **Table Columns Explained:**
+    - **Buy Position**: Optimal entry point for the trade
+    - **Sell Position**: Target exit point for profit
+    - **Reason**: Why this stock is recommended
+    - **High Returns**: Expected profit range
+    - **Risk Factors**: Potential risks to consider
     """)
     
-    st.write("---")
-    
-    # Popular stocks list with sectors
-    popular_stocks = {
-        "💼 Finance": ["RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS"],
-        "🖥️ IT/Tech": ["TCS.NS", "INFY.NS", "WIPRO.NS", "TECHM.NS"],
-        "🏭 Industrial": ["ADANIENT.NS", "MARUTI.NS", "BAJAJFINSV.NS"],
-        "🛢️ Energy": ["BPCL.NS", "COALINDIA.NS"],
-        "🏪 FMCG": ["ITC.NS", "HINDUNILVR.NS", "BRITANNIA.NS"],
-    }
-    
-    # Filter by sector
-    st.subheader("🔍 Filter Stocks by Sector")
-    selected_sector = st.selectbox(
-        "Select a Sector",
-        ["All Stocks"] + list(popular_stocks.keys()),
-        help="Choose a sector to filter stocks"
-    )
-    
-    if selected_sector == "All Stocks":
-        watchlist = []
-        for sector_stocks in popular_stocks.values():
-            watchlist.extend(sector_stocks)
-    else:
-        watchlist = popular_stocks.get(selected_sector, [])
-    
-    # Prediction filter
-    col1, col2 = st.columns(2)
-    with col1:
-        min_probability = st.slider(
-            "Minimum Probability (for UP movement)",
-            0.0, 1.0, 0.5,
-            help="Filter stocks by minimum prediction probability"
-        )
-    with col2:
-        prediction_type = st.radio(
-            "Show Predictions",
-            ["Only Strong BUY (>60%)", "All Predictions", "Only Strong SELL (<40%)"],
-            horizontal=True
-        )
-    
-    st.write("---")
-    
-    if st.button("🚀 Analyze & Predict Stock Prices", key="predict_btn"):
-        with st.spinner("⏳ Fetching data and training AI model... This may take 30-60 seconds"):
-            try:
-                # Fetch news and analyze
-                news = fetch_market_news()
-                combined_headlines = []
-                for src, headlines in news.items():
-                    combined_headlines.extend(headlines)
-                
-                sentiments = analyze_headlines(combined_headlines[:100])
-                
-                # Build sentiment map per symbol
-                sent_map = {s: 0.0 for s in watchlist}
-                for rec in sentiments:
-                    t = rec["text"].lower()
-                    for s in watchlist:
-                        base = s.split(".")[0].lower()
-                        if base in t:
-                            sent_map[s] += rec.get("compound", 0.0)
-                
-                # Fetch prices
-                prices = fetch_multiple_prices(watchlist, period="1y")
-                
-                # Build and train model
-                train_df = build_training_set(prices, sent_map)
-                
-                if train_df is not None and not train_df.empty:
-                    model = train_model(train_df, persist_path="models/model.joblib")
-                    preds = predict_for_symbols(model, train_df) if model else {}
-                    
-                    # Create results dataframe
-                    results = []
-                    for symbol, prob in preds.items():
-                        prob_pct = prob * 100
-                        
-                        # Determine signal
-                        if prob > 0.6:
-                            signal = "🟢 STRONG BUY"
-                            color_class = "call"
-                        elif prob > 0.55:
-                            signal = "🟢 BUY"
-                            color_class = "call"
-                        elif prob < 0.4:
-                            signal = "🔴 STRONG SELL"
-                            color_class = "put"
-                        elif prob < 0.45:
-                            signal = "🔴 SELL"
-                            color_class = "put"
-                        else:
-                            signal = "🟡 HOLD"
-                            color_class = "neutral"
-                        
-                        # Get sector
-                        sector = "Unknown"
-                        for sec, stocks in popular_stocks.items():
-                            if symbol in stocks:
-                                sector = sec.split()[1]
-                                break
-                        
-                        results.append({
-                            "Symbol": symbol,
-                            "Sector": sector,
-                            "Signal": signal,
-                            "Probability (%)": f"{prob_pct:.1f}%",
-                            "Confidence": "High" if prob > 0.6 or prob < 0.4 else "Medium",
-                            "News Sentiment": f"{sent_map.get(symbol, 0):.2f}"
-                        })
-                    
-                    # Convert to DataFrame
-                    results_df = pd.DataFrame(results)
-                    
-                    # Apply filtering
-                    filtered_df = results_df.copy()
-                    if prediction_type == "Only Strong BUY (>60%)":
-                        filtered_df = filtered_df[filtered_df["Probability (%)"].str.rstrip("%").astype(float) > 60]
-                    elif prediction_type == "Only Strong SELL (<40%)":
-                        filtered_df = filtered_df[filtered_df["Probability (%)"].str.rstrip("%").astype(float) < 40]
-                    
-                    # Sort by probability
-                    filtered_df["Prob_Val"] = filtered_df["Probability (%)"].str.rstrip("%").astype(float)
-                    filtered_df = filtered_df.sort_values("Prob_Val", ascending=False).drop("Prob_Val", axis=1)
-                    
-                    # ========== ENHANCED: Show Strong BUY first ==========
-                    strong_buy_df = filtered_df[filtered_df["Signal"] == "🟢 STRONG BUY"]
-                    other_df = filtered_df[filtered_df["Signal"] != "🟢 STRONG BUY"]
-                    
-                    if len(strong_buy_df) > 0:
-                        st.subheader(f"� STRONG BUY STOCKS - {len(strong_buy_df)} STOCKS WITH HIGH CONFIDENCE")
-                        st.markdown("""
-                        <div style="background-color: #d4edda; padding: 15px; border-radius: 8px; border-left: 5px solid #28a745;">
-                        <b>✨ These stocks have the HIGHEST probability of going UP (>60%)</b><br/>
-                        <small>Based on AI analysis + Latest market news sentiment</small>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        for idx, row in strong_buy_df.iterrows():
-                            st.markdown(f"""
-                            <div class="call-box">
-                                <b>✅ {row['Symbol']}</b> ({row['Sector']})<br/>
-                                🎯 Signal: {row['Signal']} | Probability: <b>{row['Probability (%)']}</b><br/>
-                                💪 Confidence: {row['Confidence']} | 📰 News Sentiment: {row['News Sentiment']}<br/>
-                                <small style="color: green;">✓ RECOMMENDED FOR TODAY'S TRADING</small>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        st.write("---")
-                    
-                    st.subheader(f"�📈 All Stock Predictions ({len(filtered_df)} stocks)")
-                    
-                    if len(filtered_df) > 0:
-                        # Display as table with color coding
-                        st.markdown("### Predicted Stock Movements:")
-                        
-                        for idx, row in filtered_df.iterrows():
-                            if "BUY" in row["Signal"]:
-                                st.markdown(f"""
-                                <div class="call-box">
-                                    <b>{row['Symbol']}</b> ({row['Sector']}) | {row['Signal']} | {row['Probability (%)']} 
-                                    <br/><small>Confidence: {row['Confidence']} | News Score: {row['News Sentiment']}</small>
-                                </div>
-                                """, unsafe_allow_html=True)
-                            elif "SELL" in row["Signal"]:
-                                st.markdown(f"""
-                                <div class="put-box">
-                                    <b>{row['Symbol']}</b> ({row['Sector']}) | {row['Signal']} | {row['Probability (%)']} 
-                                    <br/><small>Confidence: {row['Confidence']} | News Score: {row['News Sentiment']}</small>
-                                </div>
-                                """, unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"""
-                                <div class="neutral-box">
-                                    <b>{row['Symbol']}</b> ({row['Sector']}) | {row['Signal']} | {row['Probability (%)']} 
-                                    <br/><small>Confidence: {row['Confidence']} | News Score: {row['News Sentiment']}</small>
-                                </div>
-                                """, unsafe_allow_html=True)
-                        
-                        st.write("---")
-                        st.markdown("**📊 Full Data Table:**")
-                        st.dataframe(filtered_df, use_container_width=True)
-                    else:
-                        st.warning("No stocks match the selected criteria. Try adjusting filters.")
-                else:
-                    st.warning("⚠️ Could not build training set. Some stocks may not have sufficient price data.")
-            except Exception as e:
-                st.error(f"❌ Error during prediction: {str(e)}")
-    
-    st.write("---")
-    st.markdown("**📌 How to interpret the results:**")
+    # Add disclaimer
     st.markdown("""
-    - **🟢 STRONG BUY**: Probability >60% to go UP - Best opportunity
-    - **🟢 BUY**: Probability 55-60% to go UP - Good opportunity  
-    - **🟡 HOLD**: Probability 40-55% - Uncertain, wait for clarity
-    - **🔴 SELL**: Probability 40-45% to go DOWN - Consider selling
-    - **🔴 STRONG SELL**: Probability <40% to go DOWN - High risk
+    <div class="disclaimer">
+    <strong>⚠️ Educational Disclaimer:</strong> These are educational recommendations, NOT financial advice. 
+    Penny stocks are extremely risky and can result in complete loss of capital. 
+    Always consult a financial advisor and do your own research.
+    </div>
+    """, unsafe_allow_html=True)
     
-    **Data Source**: 
-    - 📊 Price Data: Yahoo Finance
-    - 📰 News Data: Economic Times, Moneycontrol, NSE, BSE
-    - 🤖 AI Model: Random Forest Classifier (trained on 1-year historical data)
+    st.write("---")
+    
+    # Add info about dynamic reasons
+    st.info("""
+    📰 **Dynamic News-Based Reasons:**
+    The "Reason to Buy/Sell" column now shows real-time reasons based on:
+    - Current market news and events
+    - Festival seasons (PONGAL, Diwali, etc.)
+    - Economic announcements
+    - Government policies
+    - Seasonal trends
+    
+    Click "🌐 Refresh with Latest News" in sidebar for fresh reasons!
+    """)
+    
+    # Fetch enhanced intraday tables with loading optimization
+    with st.spinner(" Loading optimized predictions..."):
+        try:
+            # Use stable predictor with caching for ultra-fast loading
+            intraday_tables = cached_fetch(
+                CACHE_KEYS['stock_predictions'],
+                get_stable_predictions,
+                max_age_hours=23  # 23 hours cache (stable for the day)
+            )
+            
+            # Display each table
+            for table_name, stocks in intraday_tables.items():
+                if not stocks:
+                    continue
+                    
+                st.subheader(f"📈 {table_name} - Top {len(stocks)} Picks")
+                
+                # Create DataFrame for the table
+                table_data = []
+                for stock in stocks:
+                    table_data.append({
+                        'Stock Name': stock['stock_name'],
+                        'Price': stock['price'],
+                        'Buy Position': stock['buy_position'],
+                        'Sell Position': stock['sell_position'],
+                        'Reason to Buy/Sell': stock['reason'],
+                        'High Returns': stock['high_returns'],
+                        'Risk Factors': stock['risk_factors'],
+                        'Confidence': f"{stock['confidence']:.0f}%"
+                    })
+                
+                df = pd.DataFrame(table_data)
+                
+                # Display with responsive styling
+                def color_confidence(val):
+                    if isinstance(val, str) and '%' in val:
+                        conf_val = float(val.replace('%', ''))
+                        if conf_val >= 80:
+                            return 'background-color: #d4edda; color: #155724'
+                        elif conf_val >= 60:
+                            return 'background-color: #fff3cd; color: #856404'
+                        else:
+                            return 'background-color: #f8d7da; color: #721c24'
+                    return ''
+                
+                styled_df = df.style.applymap(color_confidence, subset=['Confidence'])
+                
+                # Responsive table display
+                if st.session_state.get('screen_width', 1200) < 768:
+                    # Mobile: Show simplified table with horizontal scroll
+                    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=300)
+                elif st.session_state.get('screen_width', 1200) < 1024:
+                    # Tablet: Medium height
+                    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=400)
+                else:
+                    # Desktop: Full height
+                    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                
+                # Add category-specific insights
+                if table_name == "Penny Stocks":
+                    st.warning("""
+                    🚨 **Penny Stock Alert:** These are high-risk, high-reward stocks. 
+                    - Only invest what you can afford to lose completely
+                    - These stocks can be very volatile
+                    - Liquidity may be limited
+                    - Suitable for experienced traders only
+                    """)
+                elif table_name == "Regular Stocks":
+                    st.info("""
+                    💼 **Regular Stocks:** More stable large-cap stocks. 
+                    - Lower risk compared to penny stocks
+                    - Better liquidity and tracking
+                    - Suitable for most investors
+                    - Moderate returns expected
+                    """)
+                else:  # Mixed Picks
+                    st.success("""
+                    🎯 **Mixed Picks:** Best opportunities across categories. 
+                    - Balanced risk-reward profile
+                    - Diversified recommendations
+                    - Carefully selected from both segments
+                    """)
+                
+                st.write("---")
+            
+            # Overall market summary - responsive layout
+            st.subheader("📊 Market Summary & Insights")
+            
+            # Calculate summary statistics
+            all_stocks = []
+            for stocks in intraday_tables.values():
+                all_stocks.extend(stocks)
+            
+            if all_stocks:
+                avg_confidence = sum(s['confidence'] for s in all_stocks) / len(all_stocks)
+                penny_count = sum(1 for s in all_stocks if s['is_penny'])
+                regular_count = len(all_stocks) - penny_count
+                positive_changes = sum(1 for s in all_stocks if s['price_change_pct'] > 0)
+                
+                # Responsive metrics layout
+                if st.session_state.get('screen_width', 1200) < 480:
+                    # Mobile: Single column
+                    st.metric("💯 Avg Confidence", f"{avg_confidence:.1f}%")
+                    st.metric("📈 Penny Stocks", penny_count)
+                    st.metric("💼 Regular Stocks", regular_count)
+                    st.metric("📊 Positive Signals", f"{positive_changes}/{len(all_stocks)}")
+                elif st.session_state.get('screen_width', 1200) < 768:
+                    # Tablet: 2x2 grid
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("💯 Avg Confidence", f"{avg_confidence:.1f}%")
+                    with col2:
+                        st.metric("📈 Penny Stocks", penny_count)
+                    
+                    col3, col4 = st.columns(2)
+                    with col3:
+                        st.metric("💼 Regular Stocks", regular_count)
+                    with col4:
+                        st.metric("📊 Positive Signals", f"{positive_changes}/{len(all_stocks)}")
+                else:
+                    # Desktop: 4 columns
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("💯 Avg Confidence", f"{avg_confidence:.1f}%")
+                    with col2:
+                        st.metric("📈 Penny Stocks", penny_count)
+                    with col3:
+                        st.metric("💼 Regular Stocks", regular_count)
+                    with col4:
+                        st.metric("📊 Positive Signals", f"{positive_changes}/{len(all_stocks)}")
+                
+                # Market recommendation
+                if avg_confidence > 75:
+                    market_rec = "🟢 STRONG MARKET - Good trading conditions"
+                elif avg_confidence > 60:
+                    market_rec = "🟡 MODERATE MARKET - Decent opportunities"
+                else:
+                    market_rec = "🔴 WEAK MARKET - Be very cautious"
+                
+                st.markdown(f"**Overall Market Condition:** {market_rec}")
+                
+                # Top pick highlight
+                top_stock = max(all_stocks, key=lambda x: x['overall_score'])
+                st.success(f"🏆 **Today's Top Pick:** {top_stock['stock_name']} at {top_stock['price']} with {top_stock['confidence']:.0f}% confidence")
+            
+        except Exception as e:
+            st.error(f"❌ Error analyzing stocks: {str(e)}")
+            st.info("Please check your internet connection and try again.")
+    
+    st.write("---")
+    st.markdown("""
+    **📌 How to use these tables:**
+    - **Buy Position**: Enter the trade at or near this price
+    - **Sell Position**: Take profits at this target price
+    - **High Returns**: Expected profit range (not guaranteed)
+    - **Risk Factors**: Be aware of these potential issues
+    - **Confidence**: How sure we are about the prediction
+    
+    **⚠️ Important Notes:**
+    - These are educational recommendations, NOT financial advice
+    - Penny stocks can lose 100% of their value
+    - Always use stop-loss orders to limit losses
+    - Market conditions can change rapidly
+    - Past performance does not guarantee future results
+    
+    **📊 Data Sources:**
+    - Live price data from Yahoo Finance
+    - Volume and trend analysis
+    - Options chain sentiment (when available)
+    - Market news sentiment analysis
+    - Technical indicators and patterns
     """)
 
 
